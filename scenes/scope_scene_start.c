@@ -9,12 +9,12 @@ typedef struct {
 } ModeEntry;
 
 static const ModeEntry MODES[] = {
-    { "Time",      "Oscilloscope: continuous",  "time-domain trace"           },
-    { "Capture",   "Triggered capture;",        "saves on threshold cross"    },
-    { "Record",    "Records all to SD;",        "silence is recorded too"     },
-    { "FFT",       "Frequency spectrum",        "via FFT"                     },
-    { "Counter",   "Pulse counter:",            "shows CPS and CPM"           },
-    { "Histogram", "Pulse-height histogram",    "for spectroscopy"            },
+    { "Time",      "Oscilloscope: continuous",  "time-domain trace"        },
+    { "Capture",   "Triggered capture;",        "saves on threshold cross"  },
+    { "Record",    "Records all to SD;",        "silence is recorded too"   },
+    { "FFT",       "Frequency spectrum",        "via FFT"                   },
+    { "Counter",   "Pulse counter:",            "shows CPS and CPM"         },
+    { "Histogram", "Pulse-height histogram",    "for spectroscopy"          },
 };
 #define MODE_COUNT ((int)(sizeof(MODES) / sizeof(MODES[0])))
 
@@ -23,35 +23,31 @@ static const ModeEntry MODES[] = {
 #define ROW_ABOUT    2
 #define ROW_COUNT    3
 
-// ── Layout (128×64 Monochrome, FontSecondary ~8px tall) ─────────────────────────
-// Run row: y=0..10 (11px)
-#define RUN_Y_TOP   0
-#define RUN_Y_H     11
-#define RUN_Y_TEXT  9
+// ── Layout (128×64 OLED, FontSecondary ~8px tall) ─────────────────────────
+#define ROW_H        13   // uniform height for selectable rows
 
-// Mode picker box: below Run row, only as wide as "Histogram" (widest label).
-// FontSecondary ≈6px/char; 9 chars + ~4px pad each side ≈ 62px → 64px box.
-// Arrows sit outside the box.
-#define PKR_Y_TOP   (RUN_Y_TOP + RUN_Y_H)      // = 11
-#define PKR_H       16                           // 2 font-heights tall
-#define PKR_W       64
-#define PKR_X       ((128 - PKR_W) / 2)         // = 32 (centred)
-#define PKR_Y_TEXT  (PKR_Y_TOP + 12)            // = 23 (8px font centred in 16px box)
-#define PKR_ARW_LX  (PKR_X - 8)                 // = 24
-#define PKR_ARW_RX  (PKR_X + PKR_W + 2)         // = 98
+// Run row
+#define RUN_Y_BOX    0
+#define RUN_Y_TEXT   10   // baseline
 
-// Description: 2 lines below picker
-#define DESC1_Y     (PKR_Y_TOP + PKR_H + 8)     // = 35 (baseline)
-#define DESC2_Y     (DESC1_Y + 9)               // = 44 (baseline)
+// Inline mode picker within the Run row.
+// Label area is fixed to the width of "Histogram" (widest label) so the
+// arrows don't move. Label is centred dynamically within that area.
+#define PKR_ARW_LX   26                          // "<" x position
+#define PKR_LBL_X    34                          // label area start (after "<" + gap)
+#define PKR_LBL_W    64                          // wide enough for "Histogram"
+#define PKR_ARW_RX   (PKR_LBL_X + PKR_LBL_W + 2)  // ">" x position = 100
 
-// Divider + lower rows
-#define DIV_Y       (DESC2_Y + 1)               // = 45
-#define SET_Y_TOP   (DIV_Y + 1)                 // = 46
-#define SET_Y_H     9
-#define SET_Y_TEXT  (SET_Y_TOP + 8)             // = 54
-#define ABT_Y_TOP   (SET_Y_TOP + SET_Y_H)       // = 55
-#define ABT_Y_H     9
-#define ABT_Y_TEXT  (ABT_Y_TOP + 8)             // = 63
+// Description: 2 lines below Run row
+#define DESC1_Y      21   // baseline
+#define DESC2_Y      30   // baseline
+
+// Divider and lower rows
+#define DIV_Y        32
+#define SET_Y_BOX    33
+#define SET_Y_TEXT   43
+#define ABT_Y_BOX    46
+#define ABT_Y_TEXT   56
 
 // ── Draw callback ──────────────────────────────────────────────────────────
 void scope_scene_start_draw_cb(Canvas* canvas, void* model_ptr) {
@@ -61,26 +57,24 @@ void scope_scene_start_draw_cb(Canvas* canvas, void* model_ptr) {
 
     // ── Run row ─────────────────────────────────────────────────────────────
     if(m->selected == ROW_RUN) {
-        canvas_draw_rbox(canvas, 0, RUN_Y_TOP, 128, RUN_Y_H, 2);
+        canvas_draw_rbox(canvas, 0, RUN_Y_BOX, 128, ROW_H, 2);
         canvas_invert_color(canvas);
     }
     canvas_draw_str(canvas, 2, RUN_Y_TEXT, "Run");
-    if(m->selected == ROW_RUN) canvas_invert_color(canvas);
-
-    // ── Mode picker (always visible, below Run row) ──────────────────────────
-    canvas_draw_rframe(canvas, PKR_X, PKR_Y_TOP, PKR_W, PKR_H, 2);
 
     if(m->mode_idx > 0)
-        canvas_draw_str(canvas, PKR_ARW_LX, PKR_Y_TEXT, "<");
+        canvas_draw_str(canvas, PKR_ARW_LX, RUN_Y_TEXT, "<");
     if(m->mode_idx < MODE_COUNT - 1)
-        canvas_draw_str(canvas, PKR_ARW_RX, PKR_Y_TEXT, ">");
+        canvas_draw_str(canvas, PKR_ARW_RX, RUN_Y_TEXT, ">");
 
-    // Centre mode label inside picker box
+    // Centre the mode label inside the fixed-width picker area
     const char* lbl = MODES[m->mode_idx].label;
     int32_t lw = (int32_t)canvas_string_width(canvas, lbl);
-    canvas_draw_str(canvas, PKR_X + (PKR_W - lw) / 2, PKR_Y_TEXT, lbl);
+    canvas_draw_str(canvas, PKR_LBL_X + (PKR_LBL_W - lw) / 2, RUN_Y_TEXT, lbl);
 
-    // ── Description (2 lines) ────────────────────────────────────────────────
+    if(m->selected == ROW_RUN) canvas_invert_color(canvas);
+
+    // ── Description (2 lines below Run row) ──────────────────────────────────
     canvas_draw_str(canvas, 2, DESC1_Y, MODES[m->mode_idx].desc1);
     canvas_draw_str(canvas, 2, DESC2_Y, MODES[m->mode_idx].desc2);
 
@@ -89,7 +83,7 @@ void scope_scene_start_draw_cb(Canvas* canvas, void* model_ptr) {
 
     // ── Settings row ─────────────────────────────────────────────────────────
     if(m->selected == ROW_SETTINGS) {
-        canvas_draw_rbox(canvas, 0, SET_Y_TOP, 128, SET_Y_H, 2);
+        canvas_draw_rbox(canvas, 0, SET_Y_BOX, 128, ROW_H, 2);
         canvas_invert_color(canvas);
     }
     canvas_draw_str(canvas, 2, SET_Y_TEXT, "Settings");
@@ -97,7 +91,7 @@ void scope_scene_start_draw_cb(Canvas* canvas, void* model_ptr) {
 
     // ── About row ────────────────────────────────────────────────────────────
     if(m->selected == ROW_ABOUT) {
-        canvas_draw_rbox(canvas, 0, ABT_Y_TOP, 128, ABT_Y_H, 2);
+        canvas_draw_rbox(canvas, 0, ABT_Y_BOX, 128, ROW_H, 2);
         canvas_invert_color(canvas);
     }
     canvas_draw_str(canvas, 2, ABT_Y_TEXT, "About");
