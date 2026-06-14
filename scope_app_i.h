@@ -4,6 +4,7 @@
 #include "scenes/scope_scene.h"
 
 #include <gui/gui.h>
+#include <gui/view.h>
 #include <gui/view_dispatcher.h>
 #include <gui/scene_manager.h>
 #include <gui/modules/submenu.h>
@@ -60,18 +61,8 @@ static const scalesize scale_list[] = {
 };
 
 // ── Measurement modes ──────────────────────────────────────────────────────
-enum measureenum { m_time, m_voltage, m_capture, m_fft, m_pulse, m_histogram };
-
-typedef struct { enum measureenum type; char* str; } measurement;
-
-static const measurement measurement_list[] = {
-    {m_time,      "Time"},
-    {m_voltage,   "Voltage"},
-    {m_capture,   "Capture"},
-    {m_fft,       "FFT"},
-    {m_pulse,     "PulseCount"},
-    {m_histogram, "Histogram"},
-};
+// m_voltage kept in enum but not exposed in the main menu (used internally)
+enum measureenum { m_time, m_voltage, m_capture, m_record, m_fft, m_pulse, m_histogram };
 
 // ── Trigger threshold (for PulseCount + Histogram) ────────────────────────
 typedef struct { uint16_t mv; char* str; } threshold;
@@ -89,6 +80,16 @@ static const threshold threshold_list[] = {
     {2000, "2.0V"},
 };
 
+// ── Main-menu model (for custom start view) ────────────────────────────────
+typedef struct {
+    uint8_t selected;   // 0=Run, 1=Settings, 2=About
+    uint8_t mode_idx;   // index into the six menu modes
+} StartMenuModel;
+
+// Callbacks defined in scope_scene_start.c, registered in scope.c
+void scope_scene_start_draw_cb(Canvas* canvas, void* model);
+bool scope_scene_start_input_cb(InputEvent* event, void* ctx);
+
 // ── App state ──────────────────────────────────────────────────────────────
 struct ScopeApp {
     Gui*                gui;
@@ -96,9 +97,10 @@ struct ScopeApp {
     SceneManager*       scene_manager;
     NotificationApp*    notifications;
     VariableItemList*   variable_item_list;
-    Submenu*            submenu;
+    Submenu*            submenu;        // kept for back-compat; not used by start scene
     Widget*             widget;
     TextInput*          text_input;
+    View*               start_view;    // Custom main-menu view
 
     double              time;           // Seconds per sample
     int                 fft;            // FFT window size
@@ -113,4 +115,7 @@ struct ScopeApp {
 
 enum ScopeCustomEvent {
     ScopeCustomEventTextInputDone,
+    ScopeCustomEventStartRun,
+    ScopeCustomEventStartSettings,
+    ScopeCustomEventStartAbout,
 };

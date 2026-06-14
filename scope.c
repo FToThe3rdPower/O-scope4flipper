@@ -62,6 +62,18 @@ static ScopeApp* scope_app_alloc(void) {
     view_dispatcher_add_view(app->view_dispatcher, ScopeViewSave,
         text_input_get_view(app->text_input));
 
+    // Custom main-menu view
+    app->start_view = view_alloc();
+    view_set_draw_callback(app->start_view, scope_scene_start_draw_cb);
+    view_set_input_callback(app->start_view, scope_scene_start_input_cb);
+    view_set_context(app->start_view, app);
+    view_allocate_model(app->start_view, ViewModelTypeLocking, sizeof(StartMenuModel));
+    StartMenuModel* sm = view_get_model(app->start_view);
+    sm->selected  = 0;
+    sm->mode_idx  = 0;
+    view_commit_model(app->start_view, false);
+    view_dispatcher_add_view(app->view_dispatcher, ScopeViewStart, app->start_view);
+
     // Defaults
     app->time        = 1e-3;   // 1 ms/sample → 1 kHz
     app->scale       = 1.0f;
@@ -87,6 +99,9 @@ static void scope_app_free(ScopeApp* app) {
 
     view_dispatcher_remove_view(app->view_dispatcher, ScopeViewSave);
     text_input_free(app->text_input);
+
+    view_dispatcher_remove_view(app->view_dispatcher, ScopeViewStart);
+    view_free(app->start_view);
 
     view_dispatcher_free(app->view_dispatcher);
     scene_manager_free(app->scene_manager);

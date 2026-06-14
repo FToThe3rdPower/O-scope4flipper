@@ -1,0 +1,5 @@
+ADD_SCENE(Scope, start, Start)
+ADD_SCENE(Scope, run, Run)
+ADD_SCENE(Scope, save, Save)
+ADD_SCENE(Scope, setup, Setup)
+ADD_SCENE(Scope, about, About)
