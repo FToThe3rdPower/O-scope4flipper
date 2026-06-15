@@ -23,7 +23,7 @@ static const ModeEntry MODES[] = {
 #define ROW_ABOUT    2
 #define ROW_COUNT    3
 
-// ── Layout (128×64 OLED, FontSecondary ~8px tall) ─────────────────────────
+// ── Layout (128×64 Monochrome, FontSecondary ~8px tall) ─────────────────────────
 #define ROW_H        13   // uniform height for selectable rows
 
 // Run row
