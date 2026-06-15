@@ -119,5 +119,4 @@ enum ScopeCustomEvent {
     ScopeCustomEventStartSettings,
     ScopeCustomEventStartLoad,
     ScopeCustomEventStartAbout,
-    ScopeCustomEventLoadSelect,
 };
