@@ -16,6 +16,8 @@ App(
         "scenes/adc.c",
         "scenes/scope_scene.c",
         "scenes/scope_scene_about.c",
+        "scenes/scope_scene_load.c",
+        "scenes/scope_scene_playback.c",
         "scenes/scope_scene_run.c",
         "scenes/scope_scene_save.c",
         "scenes/scope_scene_setup.c",

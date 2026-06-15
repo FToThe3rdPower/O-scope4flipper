@@ -82,7 +82,7 @@ static const threshold threshold_list[] = {
 
 // ── Main-menu model (for custom start view) ────────────────────────────────
 typedef struct {
-    uint8_t selected;   // 0=Run, 1=Settings, 2=About
+    uint8_t selected;   // 0=Run, 1=Settings, 2=Load, 3=About
     uint8_t mode_idx;   // index into the six menu modes
 } StartMenuModel;
 
@@ -117,5 +117,7 @@ enum ScopeCustomEvent {
     ScopeCustomEventTextInputDone,
     ScopeCustomEventStartRun,
     ScopeCustomEventStartSettings,
+    ScopeCustomEventStartLoad,
     ScopeCustomEventStartAbout,
+    ScopeCustomEventLoadSelect,
 };

@@ -20,8 +20,9 @@ static const ModeEntry MODES[] = {
 
 #define ROW_RUN      0
 #define ROW_SETTINGS 1
-#define ROW_ABOUT    2
-#define ROW_COUNT    3
+#define ROW_LOAD     2
+#define ROW_ABOUT    3
+#define ROW_COUNT    4
 
 // ── Layout (128×64 Monochrome, FontSecondary ~8px tall) ─────────────────────────
 #define ROW_H        13   // uniform height for selectable rows
@@ -42,12 +43,15 @@ static const ModeEntry MODES[] = {
 #define DESC1_Y      21   // baseline
 #define DESC2_Y      30   // baseline
 
-// Divider and lower rows
+// Divider and lower rows (3 rows × 10 px each = 30 px, fits in 64-32=32 px)
+#define LOWER_ROW_H  10
 #define DIV_Y        32
 #define SET_Y_BOX    33
-#define SET_Y_TEXT   43
-#define ABT_Y_BOX    46
-#define ABT_Y_TEXT   56
+#define SET_Y_TEXT   41
+#define LOD_Y_BOX    43
+#define LOD_Y_TEXT   51
+#define ABT_Y_BOX    53
+#define ABT_Y_TEXT   61
 
 // ── Draw callback ──────────────────────────────────────────────────────────
 void scope_scene_start_draw_cb(Canvas* canvas, void* model_ptr) {
@@ -83,15 +87,23 @@ void scope_scene_start_draw_cb(Canvas* canvas, void* model_ptr) {
 
     // ── Settings row ─────────────────────────────────────────────────────────
     if(m->selected == ROW_SETTINGS) {
-        canvas_draw_rbox(canvas, 0, SET_Y_BOX, 128, ROW_H, 2);
+        canvas_draw_rbox(canvas, 0, SET_Y_BOX, 128, LOWER_ROW_H, 2);
         canvas_invert_color(canvas);
     }
     canvas_draw_str(canvas, 2, SET_Y_TEXT, "Settings");
     if(m->selected == ROW_SETTINGS) canvas_invert_color(canvas);
 
+    // ── Load row ──────────────────────────────────────────────────────────────
+    if(m->selected == ROW_LOAD) {
+        canvas_draw_rbox(canvas, 0, LOD_Y_BOX, 128, LOWER_ROW_H, 2);
+        canvas_invert_color(canvas);
+    }
+    canvas_draw_str(canvas, 2, LOD_Y_TEXT, "Load");
+    if(m->selected == ROW_LOAD) canvas_invert_color(canvas);
+
     // ── About row ────────────────────────────────────────────────────────────
     if(m->selected == ROW_ABOUT) {
-        canvas_draw_rbox(canvas, 0, ABT_Y_BOX, 128, ROW_H, 2);
+        canvas_draw_rbox(canvas, 0, ABT_Y_BOX, 128, LOWER_ROW_H, 2);
         canvas_invert_color(canvas);
     }
     canvas_draw_str(canvas, 2, ABT_Y_TEXT, "About");
@@ -135,6 +147,8 @@ bool scope_scene_start_input_cb(InputEvent* event, void* ctx) {
             view_dispatcher_send_custom_event(app->view_dispatcher, ScopeCustomEventStartRun);
         } else if(m->selected == ROW_SETTINGS) {
             view_dispatcher_send_custom_event(app->view_dispatcher, ScopeCustomEventStartSettings);
+        } else if(m->selected == ROW_LOAD) {
+            view_dispatcher_send_custom_event(app->view_dispatcher, ScopeCustomEventStartLoad);
         } else {
             view_dispatcher_send_custom_event(app->view_dispatcher, ScopeCustomEventStartAbout);
         }
@@ -173,6 +187,10 @@ bool scope_scene_start_on_event(void* context, SceneManagerEvent event) {
         }
         case ScopeCustomEventStartSettings:
             scene_manager_next_scene(app->scene_manager, ScopeSceneSetup);
+            consumed = true;
+            break;
+        case ScopeCustomEventStartLoad:
+            scene_manager_next_scene(app->scene_manager, ScopeSceneLoad);
             consumed = true;
             break;
         case ScopeCustomEventStartAbout:
