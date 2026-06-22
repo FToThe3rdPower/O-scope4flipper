@@ -68,6 +68,11 @@ enum measureenum { m_time, m_voltage, m_capture, m_record, m_fft, m_pulse, m_his
 typedef struct { uint16_t mv; char* str; } threshold;
 
 static const threshold threshold_list[] = {
+    {5,    "5mV"},
+    {10,   "10mV"},
+    {20,   "20mV"},
+    {30,   "30mV"},
+    {40,   "40mV"},
     {50,   "50mV"},
     {100,  "100mV"},
     {200,  "200mV"},
@@ -78,6 +83,16 @@ static const threshold threshold_list[] = {
     {1250, "1.25V"},
     {1500, "1.5V"},
     {2000, "2.0V"},
+};
+
+// ── LED brightness ─────────────────────────────────────────────────────────────
+typedef struct { uint8_t value; char* str; } ledlevel;
+
+static const ledlevel led_list[] = {
+    {0,   "Off"},
+    {60,  "Low"},
+    {150, "Mid"},
+    {255, "High"},
 };
 
 // ── Main-menu model (for custom start view) ────────────────────────────────
@@ -107,6 +122,7 @@ struct ScopeApp {
     float               scale;          // Display vertical scale
     enum measureenum    measurement;
     uint16_t            trigger_mv;     // Detection threshold (mV)
+    uint8_t             led_brightness; // 0=off 60=low 150=mid 255=high
 
     char                file_name_tmp[MAX_LEN_NAME];
     uint16_t*           data;           // Saved capture buffer

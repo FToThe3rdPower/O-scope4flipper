@@ -79,8 +79,9 @@ static ScopeApp* scope_app_alloc(void) {
     app->scale       = 1.0f;
     app->fft         = 256;
     app->measurement = m_time;
-    app->trigger_mv  = 200;    // 200 mV default threshold
-    app->data        = NULL;
+    app->trigger_mv    = 200;   // 200 mV default threshold
+    app->led_brightness = 255;  // High by default
+    app->data          = NULL;
     app->data_size   = 0;
 
     scene_manager_next_scene(app->scene_manager, ScopeSceneStart);
