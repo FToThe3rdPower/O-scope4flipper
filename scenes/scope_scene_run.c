@@ -31,6 +31,22 @@
 #define PAN_STEP                16      // samples to pan per button press
 #define VSHIFT_STEP_MV          100     // mV per up/down press
 
+// ─── Time-mode selectable HUD fields ──────────────────────────────────────
+#define HUD_ROW1_Y       10
+#define HUD_ROW2_Y       20
+#define HUD_MID_X        64
+#define HUD_RIGHT_END    114    // right edge for Scale text (icon starts at 116)
+#define HUD_ICON_X       116
+#define HUD_ICON_Y       1
+#define HUD_ICON_W       10
+#define HUD_ICON_H       10
+
+typedef enum { FieldTime, FieldThreshold, FieldOffset, FieldScale, FieldPlayPause, FieldCount } RunField;
+
+static inline bool has_live_hud(enum measureenum t) {
+    return t == m_time || t == m_capture || t == m_record;
+}
+
 // ─── RAM vector table (must be 512-byte aligned) ──────────────────────────────
 uint32_t ramVector[TABLE_SIZE + 1] __attribute__((aligned(512)));
 
@@ -55,6 +71,19 @@ static int16_t          g_v_offset_mv;  // Vertical level-shift (mV, can be nega
 static bool             g_hist_clear;   // Request histogram reset on next draw
 static uint16_t*        g_capture_snap; // Snapshot buffer for triggered capture
 static bool             g_capture_triggered; // True once the trigger has fired
+static RunField          g_field_sel;     // Currently highlighted Time-mode field
+static bool              g_field_editing; // True while adjusting the highlighted field
+static int               g_threshold_idx; // Index into threshold_list
+static int               g_scale_idx;     // Index into scale_list
+static int               g_time_idx;      // Index into time_list
+static int               g_fft_idx;       // Index into fft_list (FFT window size)
+
+// ─── LED run-state ────────────────────────────────────────────────────────────
+static NotificationApp*           g_notifications;
+static uint8_t                    g_led_brightness;
+static int8_t                     g_led_state;    // -1=unset 0=green 1=yellow 2=red
+static NotificationMessage        g_led_msgs[4];
+static const NotificationMessage* g_led_seq[5];
 
 // ─── ADC / DMA buffers ────────────────────────────────────────────────────────
 static uint16_t*        adc_raw;        // DMA destination (12-bit raw)
@@ -271,6 +300,13 @@ static void MX_TIM2_Init(int freq_hz) {
     LL_TIM_EnableCounter(TIM2);
 }
 
+// Re-program TIM2 for a new sample-time selection (live Time-field edits)
+static void apply_time_change(int idx) {
+    g_time_str = time_list[idx].str;
+    g_freq     = 1.0f / (float)time_list[idx].time;
+    MX_TIM2_Init((int)g_freq);
+}
+
 static void Activate_ADC(void) {
     if(LL_ADC_IsEnabled(ADC1)) return;
     LL_ADC_DisableDeepPowerDown(ADC1);
@@ -299,9 +335,42 @@ static void draw_dashed_hline(Canvas* canvas, int32_t y) {
         canvas_draw_line(canvas, x, y, x + 1, y);
 }
 
+// Draw a HUD field, highlighting it when selected/being edited (Time mode)
+static void draw_field(Canvas* canvas, int32_t x, int32_t y, const char* text, bool selected, bool editing) {
+    int32_t w = (int32_t)canvas_string_width(canvas, text);
+    if(editing) {
+        canvas_draw_box(canvas, x - 1, y - 8, w + 3, 10);
+        canvas_invert_color(canvas);
+        canvas_draw_str(canvas, x, y, text);
+        canvas_invert_color(canvas);
+    } else {
+        canvas_draw_str(canvas, x, y, text);
+        if(selected) canvas_draw_frame(canvas, x - 1, y - 8, w + 3, 10);
+    }
+}
+
+static void send_led(uint8_t r, uint8_t gv, uint8_t b) {
+    g_led_msgs[0].data.led.value = r;
+    g_led_msgs[1].data.led.value = gv;
+    g_led_msgs[2].data.led.value = b;
+    notification_message(g_notifications, (const NotificationSequence*)g_led_seq);
+}
+
+static void update_run_led(void) {
+    if(g_led_brightness == 0) return;
+    int8_t new_state = g_pause ? 1 : (g_type == m_record ? 2 : 0);
+    if(new_state == g_led_state) return;
+    g_led_state = new_state;
+    uint8_t brt = g_led_brightness;
+    if(new_state == 0)      send_led(0, brt, 0);    // green: running
+    else if(new_state == 1) send_led(brt, brt, 0);  // yellow: paused
+    else                    send_led(brt, 0, 0);     // red: recording
+}
+
 // ─── Main draw callback ───────────────────────────────────────────────────────
 static void app_draw_callback(Canvas* canvas, void* ctx) {
     UNUSED(ctx);
+    update_run_led();
     static char hud[50];
     uint32_t n = g_adc_buf_sz;
 
@@ -312,17 +381,9 @@ static void app_draw_callback(Canvas* canvas, void* ctx) {
     }
 
     // ── Pause / play icon (top-right) ────────────────────────────────────────
-    canvas_draw_icon(canvas, 116, 1, g_pause ? &I_pause_10x10 : &I_play_10x10);
-
-    // ── Mode-specific button hints ────────────────────────────────────────────
-    if(g_type == m_capture) {
-        if(!g_pause) elements_button_center(canvas, "Stop");
-        else {
-            elements_button_center(canvas, "REC");
-            elements_button_right(canvas, "Save");
-        }
-    } else if(g_type == m_record) {
-        elements_button_center(canvas, g_pause ? "Resume" : "Pause");
+    canvas_draw_icon(canvas, HUD_ICON_X, HUD_ICON_Y, g_pause ? &I_pause_10x10 : &I_play_10x10);
+    if(has_live_hud(g_type) && !g_pause && g_field_sel == FieldPlayPause) {
+        canvas_draw_frame(canvas, HUD_ICON_X - 1, HUD_ICON_Y - 1, HUD_ICON_W + 2, HUD_ICON_H + 2);
     }
 
     // ── Global min/max across full buffer (in mV) ─────────────────────────────
@@ -339,10 +400,13 @@ static void app_draw_callback(Canvas* canvas, void* ctx) {
     switch(g_type) {
 
     case m_time: {
+        bool live = !g_pause;
+
+        // Row 1: time window (left)
         snprintf(hud, sizeof(hud), "T:%s", g_time_str);
-        canvas_draw_str(canvas, 2, 10, hud);
-        snprintf(hud, sizeof(hud), "%.0fx", (double)g_scale);
-        canvas_draw_str(canvas, 95, 10, hud);
+        draw_field(canvas, 2, HUD_ROW1_Y, hud,
+            live && g_field_sel == FieldTime,
+            live && g_field_editing && g_field_sel == FieldTime);
 
         // Normalise to [-1, 1] around signal midpoint for zero-crossing detection
         float range = buf_max_v - buf_min_v;
@@ -371,11 +435,63 @@ static void app_draw_callback(Canvas* canvas, void* ctx) {
             pairs++;
         }
         if(pairs > 0 && sum > 0.0f)
-            snprintf(hud, sizeof(hud), "%.1f Hz", (double)((float)g_freq / (sum / (float)pairs)));
+            snprintf(hud, sizeof(hud), "%.1fHz", (double)((float)g_freq / (sum / (float)pairs)));
         else
-            snprintf(hud, sizeof(hud), "< 1 Hz");
-        canvas_draw_str(canvas, 2, 20, hud);
-    } break;
+            snprintf(hud, sizeof(hud), "< 1Hz");
+        {
+            // Frequency, top middle
+            int32_t w = (int32_t)canvas_string_width(canvas, hud);
+            canvas_draw_str(canvas, HUD_MID_X - w / 2, HUD_ROW1_Y, hud);
+        }
+
+        // Scale, near the play/pause icon
+        {
+            const char* s = scale_list[g_scale_idx].str;
+            int32_t w = (int32_t)canvas_string_width(canvas, s);
+            draw_field(canvas, HUD_RIGHT_END - w, HUD_ROW1_Y, s,
+                live && g_field_sel == FieldScale,
+                live && g_field_editing && g_field_sel == FieldScale);
+        }
+
+        // Row 2: trigger threshold (left)
+        snprintf(hud, sizeof(hud), "trig:%s", threshold_list[g_threshold_idx].str);
+        draw_field(canvas, 2, HUD_ROW2_Y, hud,
+            live && g_field_sel == FieldThreshold,
+            live && g_field_editing && g_field_sel == FieldThreshold);
+
+        // Level-shift offset, top middle (below frequency)
+        snprintf(hud, sizeof(hud), "%+dmV", (int)g_v_offset_mv);
+        {
+            int32_t w = (int32_t)canvas_string_width(canvas, hud);
+            draw_field(canvas, HUD_MID_X - w / 2, HUD_ROW2_Y, hud,
+                live && g_field_sel == FieldOffset,
+                live && g_field_editing && g_field_sel == FieldOffset);
+        }
+
+        // Buffer position, under the play/pause icon (paused only)
+        if(g_pause && n > DISPLAY_W) {
+            snprintf(hud, sizeof(hud), "%lu/%lu", (unsigned long)(g_h_offset + 1), (unsigned long)n);
+            int32_t w = (int32_t)canvas_string_width(canvas, hud);
+            canvas_draw_str(canvas, HUD_ICON_X + HUD_ICON_W - w, HUD_ROW2_Y, hud);
+        }
+
+        // Reference lines
+        if(g_v_offset_mv != 0) draw_dashed_hline(canvas, mv_to_y(0.0f));
+        draw_dashed_hline(canvas, mv_to_y((float)g_trigger_mv));
+
+        // Waveform (self-contained — bypasses the shared renderer below)
+        for(uint32_t px = 1; px < DISPLAY_W; px++) {
+            uint32_t si = (uint32_t)g_h_offset + px;
+            if(si >= n) break;
+            int32_t y0 = mv_to_y((float)mv_display[si - 1]);
+            int32_t y1 = mv_to_y((float)mv_display[si]);
+            if(y0 < 0 && y1 < 0) continue;
+            canvas_draw_line(canvas,
+                (int32_t)(px - 1), clampi(y0, 0, DISPLAY_H - 1),
+                (int32_t)px,       clampi(y1, 0, DISPLAY_H - 1));
+        }
+        return;
+    }
 
     case m_voltage: {
         snprintf(hud, sizeof(hud), "%.0fx", (double)g_scale);
@@ -401,6 +517,14 @@ static void app_draw_callback(Canvas* canvas, void* ctx) {
         }
         snprintf(hud, sizeof(hud), "%.1fHz", (double)((float)peak_bin * (g_freq / (float)n)));
         canvas_draw_str(canvas, 2, 10, hud);
+
+        // Window size, near the play/pause icon — Left/Right adjusts while live
+        {
+            char wbuf[16];
+            snprintf(wbuf, sizeof(wbuf), "Win:%s", fft_list[g_fft_idx].str);
+            int32_t w = (int32_t)canvas_string_width(canvas, wbuf);
+            draw_field(canvas, HUD_RIGHT_END - w, HUD_ROW1_Y, wbuf, !g_pause, false);
+        }
 
         // Render FFT bars
         float fft_max = 0.0f;
@@ -479,29 +603,107 @@ static void app_draw_callback(Canvas* canvas, void* ctx) {
     }
 
     case m_record: {
-        snprintf(hud, sizeof(hud), "REC T:%s", g_time_str);
-        canvas_draw_str(canvas, 2, 10, hud);
-    } break;
+        bool live = !g_pause;
+
+        // Row 1: time (left), scale (right)
+        snprintf(hud, sizeof(hud), "T:%s", g_time_str);
+        draw_field(canvas, 2, HUD_ROW1_Y, hud,
+            live && g_field_sel == FieldTime,
+            live && g_field_editing && g_field_sel == FieldTime);
+        {
+            const char* s = scale_list[g_scale_idx].str;
+            int32_t w = (int32_t)canvas_string_width(canvas, s);
+            draw_field(canvas, HUD_RIGHT_END - w, HUD_ROW1_Y, s,
+                live && g_field_sel == FieldScale,
+                live && g_field_editing && g_field_sel == FieldScale);
+        }
+
+        // Row 2: trig (left), offset (center)
+        snprintf(hud, sizeof(hud), "trig:%s", threshold_list[g_threshold_idx].str);
+        draw_field(canvas, 2, HUD_ROW2_Y, hud,
+            live && g_field_sel == FieldThreshold,
+            live && g_field_editing && g_field_sel == FieldThreshold);
+        snprintf(hud, sizeof(hud), "%+dmV", (int)g_v_offset_mv);
+        {
+            int32_t w = (int32_t)canvas_string_width(canvas, hud);
+            draw_field(canvas, HUD_MID_X - w / 2, HUD_ROW2_Y, hud,
+                live && g_field_sel == FieldOffset,
+                live && g_field_editing && g_field_sel == FieldOffset);
+        }
+
+        // Blinking REC badge (live only)
+        if(live && furi_get_tick() / 500 % 2) {
+            const char* rec_str = "REC";
+            int32_t rw = (int32_t)canvas_string_width(canvas, rec_str);
+            int32_t rx = HUD_MID_X - rw / 2;
+            canvas_draw_rbox(canvas, rx - 2, 1, rw + 4, 11, 2);
+            canvas_invert_color(canvas);
+            canvas_draw_str(canvas, rx, 10, rec_str);
+            canvas_invert_color(canvas);
+        }
+
+        // Paused: pan position under icon + save hint
+        if(g_pause && n > DISPLAY_W) {
+            snprintf(hud, sizeof(hud), "%lu/%lu", (unsigned long)(g_h_offset + 1), (unsigned long)n);
+            int32_t w = (int32_t)canvas_string_width(canvas, hud);
+            canvas_draw_str(canvas, HUD_ICON_X + HUD_ICON_W - w, HUD_ROW2_Y, hud);
+        }
+        if(g_pause) elements_button_right(canvas, "Save");
+
+        if(g_v_offset_mv != 0) draw_dashed_hline(canvas, mv_to_y(0.0f));
+
+        for(uint32_t px = 1; px < DISPLAY_W; px++) {
+            uint32_t si = (uint32_t)g_h_offset + px;
+            if(si >= n) break;
+            int32_t y0 = mv_to_y((float)mv_display[si - 1]);
+            int32_t y1 = mv_to_y((float)mv_display[si]);
+            if(y0 < 0 && y1 < 0) continue;
+            canvas_draw_line(canvas,
+                (int32_t)(px - 1), clampi(y0, 0, DISPLAY_H - 1),
+                (int32_t)px,       clampi(y1, 0, DISPLAY_H - 1));
+        }
+        return;
+    }
 
     case m_capture: {
-        // Use snapshot when triggered; live buffer while waiting
-        const uint16_t* src = g_capture_triggered
-            ? g_capture_snap
-            : (const uint16_t*)mv_display;
+        bool live = !g_capture_triggered;
 
+        // Row 1: time (left), scale (right)
+        snprintf(hud, sizeof(hud), "T:%s", g_time_str);
+        draw_field(canvas, 2, HUD_ROW1_Y, hud,
+            live && g_field_sel == FieldTime,
+            live && g_field_editing && g_field_sel == FieldTime);
+        {
+            const char* s = scale_list[g_scale_idx].str;
+            int32_t w = (int32_t)canvas_string_width(canvas, s);
+            draw_field(canvas, HUD_RIGHT_END - w, HUD_ROW1_Y, s,
+                live && g_field_sel == FieldScale,
+                live && g_field_editing && g_field_sel == FieldScale);
+        }
+
+        // Row 2: trig (left), offset (center)
+        snprintf(hud, sizeof(hud), "trig:%s", threshold_list[g_threshold_idx].str);
+        draw_field(canvas, 2, HUD_ROW2_Y, hud,
+            live && g_field_sel == FieldThreshold,
+            live && g_field_editing && g_field_sel == FieldThreshold);
+        snprintf(hud, sizeof(hud), "%+dmV", (int)g_v_offset_mv);
+        {
+            int32_t w = (int32_t)canvas_string_width(canvas, hud);
+            draw_field(canvas, HUD_MID_X - w / 2, HUD_ROW2_Y, hud,
+                live && g_field_sel == FieldOffset,
+                live && g_field_editing && g_field_sel == FieldOffset);
+        }
+
+        // Status overlays
         if(!g_capture_triggered) {
-            snprintf(hud, sizeof(hud), "WAIT >%dmV", (int)g_trigger_mv);
-            canvas_draw_str(canvas, 2, 10, hud);
             draw_dashed_hline(canvas, mv_to_y((float)g_trigger_mv));
             elements_button_center(canvas, "Force");
         } else {
-            canvas_draw_str(canvas, 2, 10, "CAPTURED");
-            snprintf(hud, sizeof(hud), ">%dmV", (int)g_trigger_mv);
-            canvas_draw_str(canvas, 2, 20, hud);
             elements_button_center(canvas, "Next");
             elements_button_right(canvas, "Save");
         }
 
+        const uint16_t* src = g_capture_triggered ? g_capture_snap : (const uint16_t*)mv_display;
         for(uint32_t px = 1; px < DISPLAY_W; px++) {
             uint32_t si = (uint32_t)g_h_offset + px;
             if(si >= g_adc_buf_sz) break;
@@ -570,6 +772,42 @@ static void free_bufs(void) {
     free(g_capture_snap);   g_capture_snap   = NULL;
 }
 
+// Reallocate ADC/scratch buffers and re-point DMA at a new buffer depth.
+// Used when the FFT window size changes live.
+static void resize_run_buffers(uint32_t new_sz) {
+    __disable_irq();
+    LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_1);
+
+    free_bufs();
+    g_adc_buf_sz = new_sz;
+
+    adc_raw        = malloc(g_adc_buf_sz * sizeof(uint16_t));
+    mv_buf_a       = malloc(g_adc_buf_sz * sizeof(uint16_t));
+    mv_buf_b       = malloc(g_adc_buf_sz * sizeof(uint16_t));
+    zero_idx       = malloc(g_adc_buf_sz * sizeof(int16_t));
+    norm_data      = malloc(g_adc_buf_sz * sizeof(float));
+    crossings      = malloc(g_adc_buf_sz * sizeof(float));
+    fft_buf        = malloc(g_adc_buf_sz * sizeof(float complex));
+    fft_pwr        = malloc(g_adc_buf_sz * sizeof(float));
+    g_capture_snap = malloc(g_adc_buf_sz * sizeof(uint16_t));
+
+    memset(adc_raw, 0, g_adc_buf_sz * sizeof(uint16_t));
+    memset((void*)mv_buf_a, 0, g_adc_buf_sz * sizeof(uint16_t));
+    memset((void*)mv_buf_b, 0, g_adc_buf_sz * sizeof(uint16_t));
+
+    mv_write   = mv_buf_a;
+    mv_display = mv_buf_b;
+    g_h_offset = 0;
+
+    LL_DMA_ConfigAddresses(DMA1, LL_DMA_CHANNEL_1,
+        LL_ADC_DMA_GetRegAddr(ADC1, LL_ADC_DMA_REG_REGULAR_DATA),
+        (uint32_t)adc_raw, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
+    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_1, g_adc_buf_sz);
+    LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_1);
+
+    __enable_irq();
+}
+
 // ─── Scene entry ──────────────────────────────────────────────────────────────
 void scope_scene_run_on_enter(void* context) {
     ScopeApp* app = context;
@@ -583,15 +821,38 @@ void scope_scene_run_on_enter(void* context) {
     g_v_offset_mv = 0;
     g_hist_clear = true;  // Start each session with a clean histogram
 
-    // Resolve time-period label
+    g_field_sel     = FieldPlayPause;
+    g_field_editing = false;
+
+    g_threshold_idx = 0;
+    for(uint32_t i = 0; i < COUNT_OF(threshold_list); i++) {
+        if(threshold_list[i].mv == g_trigger_mv) { g_threshold_idx = (int)i; break; }
+    }
+
+    g_scale_idx = 0;
+    for(uint32_t i = 0; i < COUNT_OF(scale_list); i++) {
+        if(scale_list[i].scale == g_scale) { g_scale_idx = (int)i; break; }
+    }
+
+    // Resolve time-period label/index
     g_time_str = "?";
+    g_time_idx = 0;
     for(uint32_t i = 0; i < COUNT_OF(time_list); i++) {
-        if(time_list[i].time == app->time) { g_time_str = time_list[i].str; break; }
+        if(time_list[i].time == app->time) {
+            g_time_str = time_list[i].str;
+            g_time_idx = (int)i;
+            break;
+        }
     }
 
     // Buffer depth: use FFT window size in FFT mode, full ADC_BUFFER_SIZE otherwise
     g_adc_buf_sz = (g_type == m_fft) ? (uint32_t)app->fft : ADC_BUFFER_SIZE;
     g_freq       = 1.0f / (float)app->time;
+
+    g_fft_idx = 0;
+    for(uint32_t i = 0; i < COUNT_OF(fft_list); i++) {
+        if(fft_list[i].window == app->fft) { g_fft_idx = (int)i; break; }
+    }
 
     // Allocate buffers
     adc_raw  = malloc(g_adc_buf_sz * sizeof(uint16_t));
@@ -604,6 +865,20 @@ void scope_scene_run_on_enter(void* context) {
     fft_pwr          = malloc(g_adc_buf_sz * sizeof(float));
     g_capture_snap   = malloc(g_adc_buf_sz * sizeof(uint16_t));
     g_capture_triggered = false;
+
+    // LED init
+    g_notifications  = app->notifications;
+    g_led_brightness = app->led_brightness;
+    g_led_state      = -1;
+    g_led_msgs[0] = (NotificationMessage){.type = NotificationMessageTypeLedRed};
+    g_led_msgs[1] = (NotificationMessage){.type = NotificationMessageTypeLedGreen};
+    g_led_msgs[2] = (NotificationMessage){.type = NotificationMessageTypeLedBlue};
+    g_led_msgs[3] = (NotificationMessage){.type = NotificationMessageTypeDoNotReset};
+    g_led_seq[0] = &g_led_msgs[0];
+    g_led_seq[1] = &g_led_msgs[1];
+    g_led_seq[2] = &g_led_msgs[2];
+    g_led_seq[3] = &g_led_msgs[3];
+    g_led_seq[4] = NULL;
 
     mv_write   = mv_buf_a;
     mv_display = mv_buf_b;
@@ -658,22 +933,30 @@ void scope_scene_run_on_enter(void* context) {
                 switch(ev.key) {
 
                 case InputKeyOk:
-                    if(g_type == m_capture) {
+                    if(g_field_editing) {
+                        g_field_editing = false;
+                    } else if(g_type == m_capture) {
                         if(g_capture_triggered) {
-                            // "Next": discard snapshot, resume watching
                             g_capture_triggered = false;
                             g_pause = 0;
                             g_h_offset = 0;
-                        } else {
-                            // "Force": snapshot the current buffer immediately
+                        } else if(g_field_sel == FieldPlayPause) {
                             const uint16_t* snap = (const uint16_t*)mv_display;
                             memcpy(g_capture_snap, snap, g_adc_buf_sz * sizeof(uint16_t));
                             g_capture_triggered = true;
                             g_pause = 1;
+                        } else {
+                            g_field_editing = true;
                         }
                     } else if(g_type == m_histogram && g_pause) {
                         g_hist_clear = true;
                         g_pause = 0;
+                    } else if(has_live_hud(g_type) && !g_pause) {
+                        if(g_field_sel == FieldPlayPause) {
+                            g_pause = 1;
+                        } else {
+                            g_field_editing = true;
+                        }
                     } else {
                         g_pause ^= 1;
                         if(!g_pause) g_h_offset = 0;
@@ -681,32 +964,110 @@ void scope_scene_run_on_enter(void* context) {
                     break;
 
                 case InputKeyUp:
-                    g_v_offset_mv += VSHIFT_STEP_MV;
-                    if(g_v_offset_mv > 2500) g_v_offset_mv = 2500;
+                    if(has_live_hud(g_type) && !g_pause) {
+                        if(!g_field_editing) {
+                            g_field_sel = (RunField)((g_field_sel + FieldCount - 1) % FieldCount);
+                        } else if(g_field_sel == FieldOffset) {
+                            g_v_offset_mv += VSHIFT_STEP_MV;
+                            if(g_v_offset_mv > 2500) g_v_offset_mv = 2500;
+                        } else if(g_field_sel == FieldThreshold) {
+                            if(g_threshold_idx < (int)COUNT_OF(threshold_list) - 1) {
+                                g_threshold_idx++;
+                                g_trigger_mv = threshold_list[g_threshold_idx].mv;
+                            }
+                        }
+                    } else {
+                        g_v_offset_mv += VSHIFT_STEP_MV;
+                        if(g_v_offset_mv > 2500) g_v_offset_mv = 2500;
+                    }
                     break;
 
                 case InputKeyDown:
-                    g_v_offset_mv -= VSHIFT_STEP_MV;
-                    if(g_v_offset_mv < -2500) g_v_offset_mv = -2500;
+                    if(has_live_hud(g_type) && !g_pause) {
+                        if(!g_field_editing) {
+                            g_field_sel = (RunField)((g_field_sel + 1) % FieldCount);
+                        } else if(g_field_sel == FieldOffset) {
+                            g_v_offset_mv -= VSHIFT_STEP_MV;
+                            if(g_v_offset_mv < -2500) g_v_offset_mv = -2500;
+                        } else if(g_field_sel == FieldThreshold) {
+                            if(g_threshold_idx > 0) {
+                                g_threshold_idx--;
+                                g_trigger_mv = threshold_list[g_threshold_idx].mv;
+                            }
+                        }
+                    } else {
+                        g_v_offset_mv -= VSHIFT_STEP_MV;
+                        if(g_v_offset_mv < -2500) g_v_offset_mv = -2500;
+                    }
                     break;
 
                 case InputKeyRight:
-                    if(g_type == m_capture && g_capture_triggered) {
+                    if(has_live_hud(g_type) && !g_pause) {
+                        if(!g_field_editing) {
+                            g_field_sel = (RunField)((g_field_sel + 1) % FieldCount);
+                        } else if(g_field_sel == FieldTime) {
+                            if(g_time_idx < (int)COUNT_OF(time_list) - 1) {
+                                g_time_idx++;
+                                apply_time_change(g_time_idx);
+                            }
+                        } else if(g_field_sel == FieldScale) {
+                            if(g_scale_idx < (int)COUNT_OF(scale_list) - 1) {
+                                g_scale_idx++;
+                                g_scale = scale_list[g_scale_idx].scale;
+                            }
+                        }
+                    } else if(g_type == m_fft && !g_pause) {
+                        if(g_fft_idx < (int)COUNT_OF(fft_list) - 1) {
+                            g_fft_idx++;
+                            resize_run_buffers((uint32_t)fft_list[g_fft_idx].window);
+                        }
+                    } else if(g_type == m_capture && g_capture_triggered) {
+                        running = false; do_save = true;
+                    } else if(g_type == m_record && g_pause) {
                         running = false; do_save = true;
                     } else if(g_pause) {
                         int32_t max_off = (int32_t)g_adc_buf_sz - DISPLAY_W;
                         if(max_off < 0) max_off = 0;
-                        g_h_offset += PAN_STEP;
-                        if(g_h_offset > max_off) g_h_offset = max_off;
+                        g_h_offset -= PAN_STEP; // paused: button scrolls the window, not the wave
+                        if(g_h_offset < 0) g_h_offset = 0;
                     }
                     break;
 
                 case InputKeyLeft:
-                    if(g_type == m_histogram && g_pause) {
+                    if(has_live_hud(g_type) && !g_pause) {
+                        if(!g_field_editing) {
+                            g_field_sel = (RunField)((g_field_sel + FieldCount - 1) % FieldCount);
+                        } else if(g_field_sel == FieldTime) {
+                            if(g_time_idx > 0) {
+                                g_time_idx--;
+                                apply_time_change(g_time_idx);
+                            }
+                        } else if(g_field_sel == FieldScale) {
+                            if(g_scale_idx > 0) {
+                                g_scale_idx--;
+                                g_scale = scale_list[g_scale_idx].scale;
+                            }
+                        }
+                    } else if(g_type == m_fft && !g_pause) {
+                        if(g_fft_idx > 0) {
+                            g_fft_idx--;
+                            resize_run_buffers((uint32_t)fft_list[g_fft_idx].window);
+                        }
+                    } else if(g_type == m_histogram && g_pause) {
                         g_hist_clear = true; // Left clears histogram when paused
                     } else if(g_pause) {
-                        g_h_offset -= PAN_STEP;
-                        if(g_h_offset < 0) g_h_offset = 0;
+                        int32_t max_off = (int32_t)g_adc_buf_sz - DISPLAY_W;
+                        if(max_off < 0) max_off = 0;
+                        g_h_offset += PAN_STEP; // paused: button scrolls the window, not the wave
+                        if(g_h_offset > max_off) g_h_offset = max_off;
+                    }
+                    break;
+
+                case InputKeyBack:
+                    if(has_live_hud(g_type) && !g_pause && g_field_editing) {
+                        g_field_editing = false;
+                    } else {
+                        running = false;
                     }
                     break;
 
@@ -748,6 +1109,15 @@ void scope_scene_run_on_enter(void* context) {
     view_port_free(vp);
     furi_record_close(RECORD_GUI);
     furi_message_queue_free(eq);
+
+    // Release LED
+    if(g_led_brightness > 0) send_led(0, 0, 0);
+
+    // Persist any live tuning back to app settings
+    app->trigger_mv = g_trigger_mv;
+    app->scale      = g_scale;
+    app->time       = time_list[g_time_idx].time;
+    app->fft        = fft_list[g_fft_idx].window;
 
     // ── Navigate ──────────────────────────────────────────────────────────────
     if(do_save) {

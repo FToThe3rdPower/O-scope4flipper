@@ -3,3 +3,4 @@ flipperscope/
 oscopeIdeas.txt
 ReadMeClaude.txt
 .vscode
+dist/debug/*
