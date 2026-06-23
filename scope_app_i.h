@@ -62,7 +62,7 @@ static const scalesize scale_list[] = {
 
 // ── Measurement modes ──────────────────────────────────────────────────────
 // m_voltage kept in enum but not exposed in the main menu (used internally)
-enum measureenum { m_time, m_voltage, m_capture, m_record, m_fft, m_pulse, m_histogram };
+enum measureenum { m_time, m_voltage, m_capture, m_record, m_fft, m_pulse, m_histogram, m_vgm };
 
 // ── Trigger threshold (for PulseCount + Histogram) ────────────────────────
 typedef struct { uint16_t mv; char* str; } threshold;

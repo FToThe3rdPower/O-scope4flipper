@@ -15,6 +15,7 @@ static const ModeEntry MODES[] = {
     { "FFT",       "Frequency spectrum",        "via FFT"                   },
     { "Counter",   "Pulse counter:",            "shows CPS and CPM"         },
     { "Histogram", "Pulse-height histogram",    "for spectroscopy"          },
+    { "VGM",       "Video Game Module ADC",     "via RP2040 over UART"      },
 };
 #define MODE_COUNT ((int)(sizeof(MODES) / sizeof(MODES[0])))
 
@@ -177,7 +178,7 @@ bool scope_scene_start_on_event(void* context, SceneManagerEvent event) {
         case ScopeCustomEventStartRun: {
             StartMenuModel* m = view_get_model(app->start_view);
             static const enum measureenum mode_map[] = {
-                m_time, m_capture, m_record, m_fft, m_pulse, m_histogram,
+                m_time, m_capture, m_record, m_fft, m_pulse, m_histogram, m_vgm,
             };
             app->measurement = mode_map[m->mode_idx];
             view_commit_model(app->start_view, false);

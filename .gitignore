@@ -3,4 +3,4 @@ flipperscope/
 oscopeIdeas.txt
 ReadMeClaude.txt
 .vscode
-dist/debug/*
+dist/debug/oscope_d.elf

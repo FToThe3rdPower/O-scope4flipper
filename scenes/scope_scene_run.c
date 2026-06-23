@@ -6,6 +6,8 @@
 #include <furi.h>
 #include <furi_hal.h>
 #include <furi_hal_resources.h>
+#include <furi_hal_serial.h>
+#include <furi_hal_serial_control.h>
 #include <gui/gui.h>
 #include <gui/elements.h>
 
@@ -44,7 +46,7 @@
 typedef enum { FieldTime, FieldThreshold, FieldOffset, FieldScale, FieldPlayPause, FieldCount } RunField;
 
 static inline bool has_live_hud(enum measureenum t) {
-    return t == m_time || t == m_capture || t == m_record;
+    return t == m_time || t == m_capture || t == m_record || t == m_vgm;
 }
 
 // ─── RAM vector table (must be 512-byte aligned) ──────────────────────────────
@@ -84,6 +86,17 @@ static uint8_t                    g_led_brightness;
 static int8_t                     g_led_state;    // -1=unset 0=green 1=yellow 2=red
 static NotificationMessage        g_led_msgs[4];
 static const NotificationMessage* g_led_seq[5];
+
+// ─── VGM UART receive state ───────────────────────────────────────────────────
+#define VGM_RING_SIZE   4096
+static FuriHalSerialHandle*  g_serial;
+static volatile uint8_t      g_vgm_ring[VGM_RING_SIZE];
+static volatile uint32_t     g_vgm_ring_head;
+static volatile uint32_t     g_vgm_ring_tail;
+static uint8_t               g_vgm_state;   // frame parser state 0-6
+static uint16_t              g_vgm_n;       // expected samples in this frame
+static uint16_t              g_vgm_idx;     // current sample index
+static uint8_t               g_vgm_hi;      // high byte of current sample
 
 // ─── ADC / DMA buffers ────────────────────────────────────────────────────────
 static uint16_t*        adc_raw;        // DMA destination (12-bit raw)
@@ -717,6 +730,71 @@ static void app_draw_callback(Canvas* canvas, void* ctx) {
         return;
     }
 
+    case m_vgm: {
+        bool live = !g_pause;
+
+        // Row 1: time label (left), scale (right)
+        snprintf(hud, sizeof(hud), "T:%s", g_time_str);
+        draw_field(canvas, 2, HUD_ROW1_Y, hud,
+            live && g_field_sel == FieldTime,
+            live && g_field_editing && g_field_sel == FieldTime);
+        {
+            const char* s = scale_list[g_scale_idx].str;
+            int32_t w = (int32_t)canvas_string_width(canvas, s);
+            draw_field(canvas, HUD_RIGHT_END - w, HUD_ROW1_Y, s,
+                live && g_field_sel == FieldScale,
+                live && g_field_editing && g_field_sel == FieldScale);
+        }
+
+        // Row 2: trig (left), offset (center)
+        snprintf(hud, sizeof(hud), "trig:%s", threshold_list[g_threshold_idx].str);
+        draw_field(canvas, 2, HUD_ROW2_Y, hud,
+            live && g_field_sel == FieldThreshold,
+            live && g_field_editing && g_field_sel == FieldThreshold);
+        {
+            snprintf(hud, sizeof(hud), "%+dmV", (int)g_v_offset_mv);
+            int32_t w = (int32_t)canvas_string_width(canvas, hud);
+            draw_field(canvas, HUD_MID_X - w / 2, HUD_ROW2_Y, hud,
+                live && g_field_sel == FieldOffset,
+                live && g_field_editing && g_field_sel == FieldOffset);
+        }
+
+        // "VGM" badge top-center (static)
+        {
+            const char* badge = "VGM";
+            int32_t bw = (int32_t)canvas_string_width(canvas, badge);
+            int32_t bx = HUD_MID_X - bw / 2;
+            canvas_draw_rbox(canvas, bx - 2, 1, bw + 4, 11, 2);
+            canvas_invert_color(canvas);
+            canvas_draw_str(canvas, bx, 10, badge);
+            canvas_invert_color(canvas);
+        }
+
+        // Paused: pan hint + Save button
+        if(g_pause && n > DISPLAY_W) {
+            snprintf(hud, sizeof(hud), "%lu/%lu",
+                (unsigned long)(g_h_offset + 1), (unsigned long)n);
+            int32_t w = (int32_t)canvas_string_width(canvas, hud);
+            canvas_draw_str(canvas, HUD_ICON_X + HUD_ICON_W - w, HUD_ROW2_Y, hud);
+        }
+        if(g_pause) elements_button_right(canvas, "Save");
+
+        if(g_v_offset_mv != 0) draw_dashed_hline(canvas, mv_to_y(0.0f));
+        draw_dashed_hline(canvas, mv_to_y((float)g_trigger_mv));
+
+        for(uint32_t px = 1; px < DISPLAY_W; px++) {
+            uint32_t si = (uint32_t)g_h_offset + px;
+            if(si >= n) break;
+            int32_t y0 = mv_to_y((float)mv_display[si - 1]);
+            int32_t y1 = mv_to_y((float)mv_display[si]);
+            if(y0 < 0 && y1 < 0) continue;
+            canvas_draw_line(canvas,
+                (int32_t)(px - 1), clampi(y0, 0, DISPLAY_H - 1),
+                (int32_t)px,       clampi(y1, 0, DISPLAY_H - 1));
+        }
+        return;
+    }
+
     default:
         break;
     }
@@ -750,6 +828,54 @@ static void app_draw_callback(Canvas* canvas, void* ctx) {
         canvas_draw_str(canvas, 60, 20, hud);
         // Draw a dashed zero-reference line so the user can see where 0V sits
         draw_dashed_hline(canvas, mv_to_y(0.0f));
+    }
+}
+
+// ─── VGM UART callbacks ───────────────────────────────────────────────────────
+static void vgm_rx_cb(FuriHalSerialHandle* handle, FuriHalSerialRxEvent event, void* ctx) {
+    UNUSED(ctx);
+    if(event == FuriHalSerialRxEventData) {
+        uint8_t b = furi_hal_serial_async_rx(handle);
+        uint32_t next = (g_vgm_ring_head + 1) % VGM_RING_SIZE;
+        if(next != g_vgm_ring_tail) {
+            g_vgm_ring[g_vgm_ring_head] = b;
+            g_vgm_ring_head = next;
+        }
+    }
+}
+
+static void vgm_process(void) {
+    while(g_vgm_ring_head != g_vgm_ring_tail) {
+        uint8_t b = g_vgm_ring[g_vgm_ring_tail];
+        g_vgm_ring_tail = (g_vgm_ring_tail + 1) % VGM_RING_SIZE;
+        switch(g_vgm_state) {
+        case 0: if(b == 0xAA) g_vgm_state = 1; break;
+        case 1: g_vgm_state = (b == 0x55) ? 2 : 0; break;
+        case 2: g_vgm_n = (uint16_t)b << 8; g_vgm_state = 3; break;
+        case 3:
+            g_vgm_n |= b;
+            g_vgm_idx = 0;
+            g_vgm_state = (g_vgm_n > 0) ? 4 : 0;
+            break;
+        case 4: g_vgm_hi = b; g_vgm_state = 5; break;
+        case 5: {
+            uint16_t mv = ((uint16_t)g_vgm_hi << 8) | b;
+            if(g_vgm_idx < (uint16_t)g_adc_buf_sz)
+                ((uint16_t*)mv_write)[g_vgm_idx] = mv;
+            g_vgm_idx++;
+            g_vgm_state = (g_vgm_idx >= g_vgm_n) ? 6 : 4;
+            break;
+        }
+        case 6:
+            // b = CRC byte — swap buffers unless paused
+            if(!g_pause) {
+                __IO uint16_t* tmp = mv_write;
+                mv_write   = mv_display;
+                mv_display = tmp;
+            }
+            g_vgm_state = 0;
+            break;
+        }
     }
 }
 
@@ -888,33 +1014,43 @@ void scope_scene_run_on_enter(void* context) {
     memset((void*)mv_buf_a, 0, g_adc_buf_sz * sizeof(uint16_t));
     memset((void*)mv_buf_b, 0, g_adc_buf_sz * sizeof(uint16_t));
 
-    // Relocate vector table to RAM so we can install our IRQ handlers
-    __disable_irq();
-    memcpy(ramVector, (uint32_t*)(FLASH_BASE | SCB->VTOR), sizeof(uint32_t) * TABLE_SIZE);
-    SCB->VTOR = (uint32_t)ramVector;
-    ramVector[27] = (uint32_t)DMA1_Channel1_IRQHandler;
-    ramVector[34] = (uint32_t)ADC1_IRQHandler;
-    ramVector[44] = (uint32_t)TIM2_IRQHandler;
-    __enable_irq();
+    if(g_type == m_vgm) {
+        // VGM mode: receive samples from RP2040 over UART instead of STM32 ADC
+        g_vgm_ring_head = g_vgm_ring_tail = 0;
+        g_vgm_state = 0;
+        g_serial = furi_hal_serial_control_acquire(FuriHalSerialIdUsart);
+        furi_hal_serial_init(g_serial, 921600);
+        furi_hal_serial_async_rx_start(g_serial, vgm_rx_cb, NULL, false);
+    } else {
+        // STM32 ADC/DMA path
+        // Relocate vector table to RAM so we can install our IRQ handlers
+        __disable_irq();
+        memcpy(ramVector, (uint32_t*)(FLASH_BASE | SCB->VTOR), sizeof(uint32_t) * TABLE_SIZE);
+        SCB->VTOR = (uint32_t)ramVector;
+        ramVector[27] = (uint32_t)DMA1_Channel1_IRQHandler;
+        ramVector[34] = (uint32_t)ADC1_IRQHandler;
+        ramVector[44] = (uint32_t)TIM2_IRQHandler;
+        __enable_irq();
 
-    furi_hal_bus_enable(FuriHalBusTIM2);
+        furi_hal_bus_enable(FuriHalBusTIM2);
 
-    MX_GPIO_Init();
-    MX_DMA_Init();
-    MX_TIM2_Init((int)g_freq);
+        MX_GPIO_Init();
+        MX_DMA_Init();
+        MX_TIM2_Init((int)g_freq);
 
-    // Enable internal 2.5 V reference (not connected externally on Flipper Zero)
-    VREFBUF->CSR |= VREFBUF_CSR_ENVR;
-    VREFBUF->CSR &= ~VREFBUF_CSR_HIZ;
-    VREFBUF->CSR |= VREFBUF_CSR_VRS;
-    while(!(VREFBUF->CSR & VREFBUF_CSR_VRR)) {}
+        // Enable internal 2.5 V reference (not connected externally on Flipper Zero)
+        VREFBUF->CSR |= VREFBUF_CSR_ENVR;
+        VREFBUF->CSR &= ~VREFBUF_CSR_HIZ;
+        VREFBUF->CSR |= VREFBUF_CSR_VRS;
+        while(!(VREFBUF->CSR & VREFBUF_CSR_VRR)) {}
 
-    MX_ADC1_Init();
-    Activate_ADC();
+        MX_ADC1_Init();
+        Activate_ADC();
 
-    if(LL_ADC_IsEnabled(ADC1) && !LL_ADC_IsDisableOngoing(ADC1) &&
-       !LL_ADC_REG_IsConversionOngoing(ADC1))
-        LL_ADC_REG_StartConversion(ADC1);
+        if(LL_ADC_IsEnabled(ADC1) && !LL_ADC_IsDisableOngoing(ADC1) &&
+           !LL_ADC_REG_IsConversionOngoing(ADC1))
+            LL_ADC_REG_StartConversion(ADC1);
+    }
 
     // Set up viewport
     FuriMessageQueue* eq = furi_message_queue_alloc(8, sizeof(InputEvent));
@@ -1008,7 +1144,8 @@ void scope_scene_run_on_enter(void* context) {
                         } else if(g_field_sel == FieldTime) {
                             if(g_time_idx < (int)COUNT_OF(time_list) - 1) {
                                 g_time_idx++;
-                                apply_time_change(g_time_idx);
+                                if(g_type == m_vgm) g_time_str = time_list[g_time_idx].str;
+                                else apply_time_change(g_time_idx);
                             }
                         } else if(g_field_sel == FieldScale) {
                             if(g_scale_idx < (int)COUNT_OF(scale_list) - 1) {
@@ -1025,6 +1162,8 @@ void scope_scene_run_on_enter(void* context) {
                         running = false; do_save = true;
                     } else if(g_type == m_record && g_pause) {
                         running = false; do_save = true;
+                    } else if(g_type == m_vgm && g_pause) {
+                        running = false; do_save = true;
                     } else if(g_pause) {
                         int32_t max_off = (int32_t)g_adc_buf_sz - DISPLAY_W;
                         if(max_off < 0) max_off = 0;
@@ -1040,7 +1179,8 @@ void scope_scene_run_on_enter(void* context) {
                         } else if(g_field_sel == FieldTime) {
                             if(g_time_idx > 0) {
                                 g_time_idx--;
-                                apply_time_change(g_time_idx);
+                                if(g_type == m_vgm) g_time_str = time_list[g_time_idx].str;
+                                else apply_time_change(g_time_idx);
                             }
                         } else if(g_field_sel == FieldScale) {
                             if(g_scale_idx > 0) {
@@ -1077,6 +1217,8 @@ void scope_scene_run_on_enter(void* context) {
                 }
             }
         }
+        if(g_type == m_vgm) vgm_process();
+
         // Triggered-capture: scan the current display buffer for a rising edge
         if(g_type == m_capture && !g_capture_triggered) {
             const uint16_t* snap = (const uint16_t*)mv_display;
@@ -1095,13 +1237,18 @@ void scope_scene_run_on_enter(void* context) {
     }
 
     // ── Teardown hardware ─────────────────────────────────────────────────────
-    furi_hal_bus_disable(FuriHalBusTIM2);
-    LL_ADC_DisableIT_OVR(ADC1);
-    LL_TIM_DisableCounter(TIM2);
-    LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_1);
-    __disable_irq();
-    SCB->VTOR = 0;
-    __enable_irq();
+    if(g_type == m_vgm) {
+        furi_hal_serial_deinit(g_serial);
+        furi_hal_serial_control_release(g_serial);
+    } else {
+        furi_hal_bus_disable(FuriHalBusTIM2);
+        LL_ADC_DisableIT_OVR(ADC1);
+        LL_TIM_DisableCounter(TIM2);
+        LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_1);
+        __disable_irq();
+        SCB->VTOR = 0;
+        __enable_irq();
+    }
 
     // ── Remove viewport ───────────────────────────────────────────────────────
     view_port_enabled_set(vp, false);
