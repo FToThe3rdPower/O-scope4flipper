@@ -16,7 +16,7 @@ O-scope4flipper/
 └── scenes/
     ├── adc.c               STM32WB LL ADC driver (copied unchanged from flipperscope)
     ├── scope_scene_run.c   main acquisition, signal processing, display
-    ├── scope_scene_setup.c settings menu (Time/sample, FFT window, Scale, Threshold)
+    ├── scope_scene_setup.c settings menu (LED brightness only)
     ├── scope_scene_save.c  save capture to SD card
     ├── scope_scene_start.c custom main menu (Run + mode picker + Settings + About)
     ├── scope_scene_about.c about / controls reference
@@ -27,8 +27,8 @@ O-scope4flipper/
 
 The main menu has three rows navigated with Up/Down:
 
-- **Run** — with Left/Right to scroll through the six operating modes (see below). Press OK to enter the selected mode.
-- **Settings** — configure Time/sample, FFT window, display scale, and trigger threshold.
+- **Run** — with Left/Right to scroll through the seven operating modes (see below). Press OK to enter the selected mode.
+- **Settings** — LED brightness selector.
 - **About** — controls reference.
 
 The selected mode name and a two-line description are shown below the Run row.
@@ -39,55 +39,101 @@ The selected mode name and a two-line description are shown below the Run row.
 | --- | --- |
 | **Time** | Continuous time-domain oscilloscope trace |
 | **Capture** | Triggered: waits for a rising edge above the threshold, snapshots that buffer, pauses for review/save |
-| **Record** | Records all samples to SD card continuously — silence is recorded too *(placeholder)* |
+| **Record** | Records all samples to SD card continuously — noise is recorded too |
 | **FFT** | Frequency spectrum via Fast Fourier Transform |
 | **Counter** | Pulse counter — displays CPS and CPM in real time |
 | **Histogram** | Pulse-height histogram (PHD) across frames — useful for radiation energy spectroscopy |
+| **VGM** | Streams waveform data from the Video Game Module's RP2040 ADC over UART (see Hardware) |
 
-### New features vs. flipperscope
+### Live HUD
 
-| Feature | Detail |
+Time, Capture, Record, and VGM modes all show a two-row interactive HUD while running:
+
+```text
+T:1ms                    1x
+trig:20mV   +0mV       [▶]
+```
+
+Up/Down cycles the selection highlight through the four fields and the play/pause icon. When a field is highlighted, OK enters edit mode and Up/Down/Left/Right change its value. OK or Back exits edit mode.
+
+| Field | Left / Right | Up / Down |
+| --- | --- | --- |
+| **T:** (time/sample) | Decrease / increase time period | — |
+| **trig:** (threshold) | — | Decrease / increase threshold |
+| **offset** (mV) | — | Shift waveform ±100 mV |
+| **scale** | Decrease / increase zoom | — |
+
+### LED run-state
+
+The Flipper RGB LED reflects the current state while in a run mode:
+
+| Color | State |
 | --- | --- |
-| **Time scales** | 14 options: 1s → 1µs (was 5) |
-| **Level shift** | Up/Down in run mode shifts waveform ±100 mV per press (range ±2.5 V); a dashed zero-reference line appears when offset is active |
-| **Horizontal pan** | Left/Right when paused scrolls through the buffer 16 samples per press; position shown as `offset/total` |
-| **Larger buffer** | 512 samples (was 128) |
-| **Triggered capture** | Capture mode auto-fires on a rising edge above threshold; OK force-triggers immediately; Right saves the snapshot to SD |
-| **Pulse counter** | Rising-edge count per buffer window → real-time CPS and CPM |
-| **Pulse-height histogram** | Accumulates peak voltages of pulses above threshold into a 128-bin PHD across frames |
-| **Trigger threshold** | Configurable in Settings (50 mV – 2.0 V, default 200 mV); used by Capture, Counter, and Histogram modes |
-| **Save uses actual buffer size** | Saves all 512 samples rather than a hardcoded 128 |
+| Green | Live / recording |
+| Yellow | Paused |
+| Red | Record mode (actively writing to SD) |
+
+Brightness is configurable in Settings (Off / Low / Mid / High).
 
 ### Run controls
 
 | Button | Action |
 | --- | --- |
-| OK | Pause / unpause |
+| OK | Pause / unpause (when no HUD field is highlighted) |
+| OK *(field highlighted, live)* | Enter field-edit mode |
+| OK *(field editing)* | Exit field-edit mode |
 | OK *(Capture, waiting)* | Force-capture the current buffer immediately |
 | OK *(Capture, triggered)* | Discard snapshot and resume watching for the next trigger |
 | OK *(Histogram, paused)* | Clear histogram and resume |
-| Up / Down | Shift waveform ±100 mV (level shift) |
+| Up / Down *(live, no edit)* | Cycle HUD field selection |
+| Up / Down *(live, editing)* | Adjust highlighted field value |
+| Up / Down *(paused)* | Shift waveform ±100 mV (level shift) |
+| Left / Right *(live, no edit)* | Cycle HUD field selection |
+| Left / Right *(live, editing)* | Adjust highlighted field value |
 | Left / Right *(paused)* | Pan through buffer 16 samples at a time |
 | Left *(Histogram, paused)* | Clear histogram |
 | Right *(Capture, triggered)* | Save snapshot to SD card |
+| Right *(Record or VGM, paused)* | Save current buffer to SD card |
+| Back *(field editing)* | Exit field-edit mode |
 | Back | Exit to main menu |
 
 ### Settings
 
 | Setting | Options |
 | --- | --- |
-| Time/sample | 1s, 500ms, 100ms, 50ms, 10ms, 5ms, 1ms, 500µs, 100µs, 50µs, 10µs, 5µs, 2µs, 1µs |
-| FFT window | 256, 512, 1024 |
-| Scale | 1×, 2×, 4×, 10×, 100× |
-| Threshold | 50 mV, 100 mV, 200 mV, 300 mV, 500 mV, 750 mV, 1.0 V, 1.25 V, 1.5 V, 2.0 V |
+| LED Brightness | Off, Low (60), Mid (150), High (255) |
+
+All other parameters (time/sample, scale, threshold, vertical offset) are adjustable live via the on-screen HUD.
+
+### Threshold options
+
+5 mV, 10 mV, 15 mV, 20 mV, 25 mV, 30 mV, 40 mV, 50 mV, 100 mV, 200 mV, 300 mV, 500 mV, 750 mV, 1.0 V, 1.25 V, 1.5 V, 2.0 V, 2.25 V, 2.5 V, 2.75 V, 3 V, 3.2 V
 
 ### Hardware
 
+#### STM32 ADC input (all modes except VGM)
+
 Signal input: pin 16 / PC0 — 0 V to 2.5 V, GND to pin 18. The internal 2.5 V VREFBUF is enabled in firmware.
+
+#### VGM mode — RP2040 over UART
+
+The Video Game Module's RP2040 samples the signal at up to 500 kSPS on GP26 (ADC0) and streams 512-sample frames to the Flipper over UART0 at 921600 baud.
+
+Wiring:
+
+| RP2040 pin | Flipper GPIO pin | Signal |
+| --- | --- | --- |
+| GP0 (UART0 TX) | Pin 14 (USART1 RX) | RP2040 → Flipper |
+| GP1 (UART0 RX) | Pin 13 (USART1 TX) | Flipper → RP2040 |
+| GND | Pin 18 | Common ground |
+
+Frame format: `0xAA 0x55` magic | 2-byte sample count (big-endian) | N × uint16_t mV values (big-endian, 0–3300) | CRC8 (poly 0x31, init 0xFF).
+
+RP2040 firmware lives in the companion repo: [flipperVideoGameModDigitizerFirmware](https://github.com/FToThe3rdPower/flipperVideoGameModDigitizerFirmware).
 
 ### Build
 
 ```bash
 cd /path/to/O-scope4flipper
-ufbt launch
+ufbt
 ```
