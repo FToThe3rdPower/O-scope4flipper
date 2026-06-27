@@ -9,10 +9,10 @@ typedef struct {
 } ModeEntry;
 
 static const ModeEntry MODES[] = {
-    { "Scope",      "continuous",               "time-domain trace"        },
+    { "Scope",     "Continuous",                "time-domain trace"         },
     { "Capture",   "Triggered capture;",        "saves on threshold cross"  },
-    { "Record",    "Records all to SD;",        "noise is recorded too"   },
-    { "FFT",       "Frequency spectrum",        "via FFT"                   },
+    { "Record",    "Records ALL to the SD;",    "noise is recorded too"     },
+    { "FFT",       "Frequency spectrum",        " "                         },
     { "Counter",   "Pulse counter:",            "shows CPS and CPM"         },
     { "Histogram", "Pulse-height histogram",    "for spectroscopy"          },
     { "VGM",       "Video Game Module ADC",     "via RP2040 over UART"      },
