@@ -117,7 +117,7 @@ Signal input: pin 16 / PC0 — 0 V to 2.5 V, GND to pin 18. The internal 2.5 V V
 
 #### VGM mode — RP2040 over UART
 
-The Video Game Module's RP2040 samples the signal at up to 500 kSPS on GP26 (ADC0) and streams 512-sample frames to the Flipper over UART0 at 921600 baud.
+The Video Game Module's RP2040 samples a <+3.3 V signal at up to 500 kSPS on GP26 (ADC0) and streams 512-sample frames to the Flipper over UART0 at 921600 baud.
 
 Wiring:
 
