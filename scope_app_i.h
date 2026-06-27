@@ -32,6 +32,7 @@ static const timeperiod time_list[] = {
     {0.005,  "5ms"},
     {1e-3,   "1ms"},
     {5e-4,   "500us"},
+    {2.5e-4, "250us"}
     {1e-4,   "100us"},
     {5e-5,   "50us"},
     {1e-5,   "10us"},
@@ -70,7 +71,9 @@ typedef struct { uint16_t mv; char* str; } threshold;
 static const threshold threshold_list[] = {
     {5,    "5mV"},
     {10,   "10mV"},
+    {15,   "15mV"},
     {20,   "20mV"},
+    {25,   "25mV"},
     {30,   "30mV"},
     {40,   "40mV"},
     {50,   "50mV"},
@@ -83,6 +86,12 @@ static const threshold threshold_list[] = {
     {1250, "1.25V"},
     {1500, "1.5V"},
     {2000, "2.0V"},
+    {2250, "2.25V"},
+    {2500, "2.5V"},
+    {2750, "2.75V"},
+    {3000, "3V"},
+    {3200, "3.2V"}
+
 };
 
 // ── LED brightness ─────────────────────────────────────────────────────────────
