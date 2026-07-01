@@ -64,6 +64,7 @@ const uint32_t MSIRangeTable[16UL] = {
 static char*            g_time_str;     // Label for current time period
 static float            g_scale;        // Vertical zoom
 static float            g_freq;         // Sample rate (Hz) — float: Cortex-M4F is single-precision only
+static uint32_t         g_full_scale_mv; // ADC full-scale reference: 2500 for STM32, 3300 for VGM (3.3V VCC)
 static uint8_t          g_pause;        // 0 = live, 1 = frozen
 static enum measureenum g_type;         // Active mode
 static uint32_t         g_adc_buf_sz;   // Total ADC buffer depth (samples)
@@ -97,6 +98,20 @@ static uint8_t               g_vgm_state;   // frame parser state 0-6
 static uint16_t              g_vgm_n;       // expected samples in this frame
 static uint16_t              g_vgm_idx;     // current sample index
 static uint8_t               g_vgm_hi;      // high byte of current sample
+static uint8_t               g_vgm_last_cmd; // last command sent to RP2040
+
+// Commands sent Flipper → RP2040 (mirror of CMD_* in vgm-scope/main.c)
+#define VGM_CMD_PAUSE       0x00
+#define VGM_CMD_RUN         0x01
+#define VGM_CMD_TRIGGERED   0x02
+#define VGM_CMD_RECORD      0x03
+
+static void send_vgm_cmd(uint8_t cmd) {
+    if(!g_serial) return;
+    if(cmd == g_vgm_last_cmd) return;
+    furi_hal_serial_tx(g_serial, &cmd, 1);
+    g_vgm_last_cmd = cmd;
+}
 
 // ─── ADC / DMA buffers ────────────────────────────────────────────────────────
 static uint16_t*        adc_raw;        // DMA destination (12-bit raw)
@@ -338,7 +353,7 @@ static void Activate_ADC(void) {
 // Maps a millivolt value + vertical offset + scale to a display Y coordinate.
 static inline int32_t mv_to_y(float mv) {
     float shifted = mv + (float)g_v_offset_mv;
-    return 63 - (int32_t)((shifted / (float)VDDA_APPLI) * g_scale * (float)(DISPLAY_H - 1));
+    return 63 - (int32_t)((shifted / (float)g_full_scale_mv) * g_scale * (float)(DISPLAY_H - 1));
 }
 
 // Draw a dashed horizontal line (every 4px, 2px on)
@@ -974,6 +989,9 @@ void scope_scene_run_on_enter(void* context) {
     // Buffer depth: use FFT window size in FFT mode, full ADC_BUFFER_SIZE otherwise
     g_adc_buf_sz = (g_type == m_fft) ? (uint32_t)app->fft : ADC_BUFFER_SIZE;
     g_freq       = 1.0f / (float)app->time;
+    // VGM sends mV scaled to 3.3V VCC; all other modes use the STM32's 2.5V reference
+    g_full_scale_mv = (g_type == m_vgm) ? 3300 : VDDA_APPLI;
+    g_vgm_last_cmd  = 0xFF; // force first send
 
     g_fft_idx = 0;
     for(uint32_t i = 0; i < COUNT_OF(fft_list); i++) {
@@ -1019,8 +1037,11 @@ void scope_scene_run_on_enter(void* context) {
         g_vgm_ring_head = g_vgm_ring_tail = 0;
         g_vgm_state = 0;
         g_serial = furi_hal_serial_control_acquire(FuriHalSerialIdUsart);
-        furi_hal_serial_init(g_serial, 921600);
-        furi_hal_serial_async_rx_start(g_serial, vgm_rx_cb, NULL, false);
+        if(g_serial) {
+            furi_hal_serial_init(g_serial, 921600);
+            furi_hal_serial_async_rx_start(g_serial, vgm_rx_cb, NULL, false);
+            send_vgm_cmd(VGM_CMD_RUN); // handshake: RP2040 is silent until it gets this
+        }
     } else {
         // STM32 ADC/DMA path
         // Relocate vector table to RAM so we can install our IRQ handlers
@@ -1062,9 +1083,15 @@ void scope_scene_run_on_enter(void* context) {
 
     // ── Main event loop ───────────────────────────────────────────────────────
     InputEvent ev;
-    bool running = true, do_save = false;
+    bool running = !(g_type == m_vgm && g_serial == NULL);
+    bool do_save = false;
     while(running) {
-        if(furi_message_queue_get(eq, &ev, 150) == FuriStatusOk) {
+        // Drain VGM ring before blocking — frames arrive every ~11 ms so the
+        // 4 kB ring fills in ~44 ms; processing here keeps it from overflowing.
+        if(g_type == m_vgm) vgm_process();
+
+        uint32_t wait_ms = (g_type == m_vgm) ? 5 : 150;
+        if(furi_message_queue_get(eq, &ev, wait_ms) == FuriStatusOk) {
             if(ev.type == InputTypePress || ev.type == InputTypeRepeat) {
                 switch(ev.key) {
 
@@ -1217,7 +1244,9 @@ void scope_scene_run_on_enter(void* context) {
                 }
             }
         }
-        if(g_type == m_vgm) vgm_process();
+        // Keep RP2040 LED and stream state in sync with the Flipper's pause state
+        if(g_type == m_vgm)
+            send_vgm_cmd(g_pause ? VGM_CMD_PAUSE : VGM_CMD_RUN);
 
         // Triggered-capture: scan the current display buffer for a rising edge
         if(g_type == m_capture && !g_capture_triggered) {
@@ -1238,8 +1267,11 @@ void scope_scene_run_on_enter(void* context) {
 
     // ── Teardown hardware ─────────────────────────────────────────────────────
     if(g_type == m_vgm) {
-        furi_hal_serial_deinit(g_serial);
-        furi_hal_serial_control_release(g_serial);
+        if(g_serial) {
+            send_vgm_cmd(VGM_CMD_PAUSE); // stop RP2040 TX before we close the port
+            furi_hal_serial_deinit(g_serial);
+            furi_hal_serial_control_release(g_serial);
+        }
     } else {
         furi_hal_bus_disable(FuriHalBusTIM2);
         LL_ADC_DisableIT_OVR(ADC1);
